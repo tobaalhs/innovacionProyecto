@@ -77,33 +77,75 @@ export default function ReportesClient() {
     setIsExporting(true);
 
     try {
-      const [{ default: html2canvas }, { default: jsPDF }] = await Promise.all([
-        import("html2canvas"),
+      const [{ toCanvas }, jsPDFModule] = await Promise.all([
+        import("html-to-image"),
         import("jspdf"),
       ]);
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const JsPDF: any = (jsPDFModule as any).jsPDF ?? jsPDFModule.default;
+
       const element = reportRef.current;
-      const canvas = await html2canvas(element, {
-        scale: 2,
-        useCORS: true,
-        backgroundColor: "#ffffff",
-        logging: false,
-      });
+
+      // Apply light-mode CSS variables directly on the element so the
+      // screenshot is always light-themed regardless of current dark/light mode.
+      // CSS custom properties cascade, so element-level vars override the
+      // dark-mode vars inherited from <html class="dark">.
+      const LIGHT_VARS: Record<string, string> = {
+        "--color-bg-base": "#F8FAF9",
+        "--color-surface": "#FFFFFF",
+        "--color-primary": "#2D6A4F",
+        "--color-primary-light": "#52B788",
+        "--color-primary-subtle": "#D8F3DC",
+        "--color-text-primary": "#111827",
+        "--color-text-secondary": "#6B7280",
+        "--color-border-base": "#E5E7EB",
+        "--color-alert-red": "#DC2626",
+        "--color-alert-red-bg": "#FEF2F2",
+        "--color-alert-yellow": "#D97706",
+        "--color-alert-yellow-bg": "#FEF3C7",
+        "--color-alert-green": "#2D6A4F",
+        "--color-alert-green-bg": "#D8F3DC",
+      };
+      Object.entries(LIGHT_VARS).forEach(([prop, val]) =>
+        element.style.setProperty(prop, val)
+      );
+
+      let canvas: HTMLCanvasElement;
+      try {
+        // html-to-image renders via SVG foreignObject → the browser's own engine
+        // handles all CSS including oklch/oklab/color-mix without a custom parser.
+        canvas = await toCanvas(element, {
+          pixelRatio: 2,
+          backgroundColor: "#ffffff",
+        });
+      } finally {
+        Object.keys(LIGHT_VARS).forEach((prop) =>
+          element.style.removeProperty(prop)
+        );
+      }
 
       const imgData = canvas.toDataURL("image/png");
-      const pdf = new jsPDF({
+
+      // Compute page dimensions: A4 width, height that exactly fits the content.
+      // A single tall page avoids mid-content page breaks entirely.
+      const pageW = 210; // mm (A4 width)
+      const margin = 12;
+      const headerH = 28;
+      const contentW = pageW - margin * 2;
+      const startY = headerH + 6;
+      const imgW = canvas.width;
+      const imgH = canvas.height;
+      const contentImgH = (imgH * contentW) / imgW; // mm, preserving aspect ratio
+      const pageH = startY + contentImgH + margin;
+
+      const pdf = new JsPDF({
         orientation: "portrait",
         unit: "mm",
-        format: "a4",
+        format: [pageW, pageH],
       });
 
-      const pageW = pdf.internal.pageSize.getWidth();
-      const pageH = pdf.internal.pageSize.getHeight();
-      const margin = 12;
-      const contentW = pageW - margin * 2;
-      const headerH = 28;
-
-      // PDF header
+      // Header bar
       pdf.setFillColor(45, 106, 79);
       pdf.rect(0, 0, pageW, headerH, "F");
       pdf.setFontSize(16);
@@ -122,33 +164,7 @@ export default function ReportesClient() {
       });
       pdf.text(`Generado: ${dateStr}`, pageW - margin, 17, { align: "right" });
 
-      // Image content
-      const imgW = canvas.width;
-      const imgH = canvas.height;
-      const imgAspect = imgW / imgH;
-      const startY = headerH + 6;
-      const availH = pageH - startY - margin;
-      const sliceH = (availH * imgW) / contentW;
-      const totalPages = Math.ceil(imgH / sliceH);
-
-      for (let p = 0; p < totalPages; p++) {
-        if (p > 0) pdf.addPage();
-
-        const sy = p * sliceH;
-        const sh = Math.min(sliceH, imgH - sy);
-        const sliceCanvas = document.createElement("canvas");
-        sliceCanvas.width = imgW;
-        sliceCanvas.height = sh;
-        const ctx = sliceCanvas.getContext("2d");
-        if (ctx) {
-          ctx.drawImage(canvas, 0, sy, imgW, sh, 0, 0, imgW, sh);
-        }
-
-        const sliceData = sliceCanvas.toDataURL("image/png");
-        const sliceDisplayH = (sh * contentW) / imgW;
-        const yPos = p === 0 ? startY : margin;
-        pdf.addImage(sliceData, "PNG", margin, yPos, contentW, sliceDisplayH);
-      }
+      pdf.addImage(imgData, "PNG", margin, startY, contentW, contentImgH);
 
       pdf.save(`CereSense-${selectedLot}-${new Date().toISOString().slice(0, 10)}.pdf`);
     } catch (err) {
